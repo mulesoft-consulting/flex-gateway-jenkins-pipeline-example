@@ -1,0 +1,102 @@
+pipeline {
+    agent any
+
+    stages {
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+        stage('Checkout Project') {
+            steps {
+               git ([url: 'https://github.com/bastump/gateway-app.git', branch: 'main', credentialsId: '45ae41f0-fc08-459c-a319-e26fc54a16a2'])
+            }
+        }
+        stage('Download Flex Gateway Image') {
+            steps {
+                sh "docker pull mulesoft/flex-gateway:${GW_VERSION}"
+            }
+        }
+        stage('Register Gateway'){
+            steps {
+                sh "mkdir runtime-conf"
+                withCredentials([usernamePassword(credentialsId: 'deploy-anypoint-user', passwordVariable: 'ANYPOINT_PASS', usernameVariable: 'ANYPOINT_USER')]) {
+                    script {
+                        ANYPOINT_TOKEN = sh(
+                            script: "curl -d 'username=$ANYPOINT_USER&password=$ANYPOINT_PASS' https://anypoint.mulesoft.com/accounts/login | jq '.access_token' | tr -d '\"'",
+                            returnStdout: true
+                        ).trim()
+                    }
+                    sh "docker run --rm --entrypoint flexctl -w /registration -v \"${WORKSPACE}/runtime-conf\":/registration mulesoft/flex-gateway:${GW_VERSION} register ${GW_NAME} --username=$ANYPOINT_USER --password=$ANYPOINT_PASS --environment=${ENV_ID} --organization=${ORG_ID} --connected=true"
+                }
+            }
+        }
+        stage('Stop Gateway if Started'){
+            steps {
+                script{
+                    try {
+                        sh "docker stop ${GW_NAME}"
+                        sh "docker rm ${GW_NAME}"
+                    } catch (Exception e) {
+                        echo 'Exception occurred: ' + e.toString()
+                        echo 'Continuing deployment...'
+                    }
+                }
+            }
+        }
+        stage('Deploy Gateway'){
+            steps {
+                script {
+                    //Get the ID of the newly created Gateway
+                    GW_ID = sh(
+                        script: '''CONF_FILE=$(ls runtime-conf/*.conf)
+                        FILENAME=$(echo "${CONF_FILE##*/}")
+                        echo "${FILENAME%%.*}"''',
+                        returnStdout: true
+                    ).trim()
+                    sh "docker run --rm -d --name ${GW_NAME} -v ${WORKSPACE}/runtime-conf/:/etc/flex-gateway/rtm -p ${GW_PORT}:8081 -e FLEX_RTM_ARM_AGENT_URL=wss://arm-mcm2-service.kdev.msap.io:443/agent -e FLEX_DATASOURCE_RTM_ENABLED=true -e FLEX_RTM_ARM_AGENT_CONFIG=/etc/flex-gateway/rtm/${GW_ID}.conf mulesoft/flex-gateway:${GW_VERSION}"
+                    sh "sleep 5" // wait for startup
+                }
+            }
+        }
+        stage('Register API'){
+            steps {
+                sh """curl -X POST -H 'Authorization: Bearer ${ANYPOINT_TOKEN}' -H 'Content-Type: application/json' https://anypoint.mulesoft.com/apimanager/xapi/v1/organizations/$ORG_ID/environments/${ENV_ID}/apis -d '{
+                    "technology": "flexGateway",
+                    "endpointUri": null,
+                    "endpoint": {
+                        "deploymentType": "HY",
+                        "muleVersion4OrAbove": null,
+                        "uri": "https://jsonplaceholder.typicode.com/users",
+                        "type": "http",
+                        "isCloudHub": null,
+                        "proxyUri": "http://0.0.0.0:8081/",
+                        "referencesUserDomain": null,
+                        "responseTimeout": null
+                    },
+                    "spec": {
+                        "assetId": "jsonplaceholder",
+                        "groupId": "${ORG_ID}",
+                        "version": "1.0.0"
+                    },
+                    "instanceLabel": "gateway-build-${BUILD_ID}",
+                    "deployment": {
+                        "environmentId": "${ENV_ID}",
+                        "type": "HY",
+                        "expectedStatus": "deployed",
+                        "overwrite": false,
+                        "targetId": "${GW_ID}",
+                        "targetName": "auto-gateway-${BUILD_ID}",
+                        "gatewayVersion": "${GW_VERSION}"
+                    }
+                }'"""
+            }
+        }
+        stage('Test Gateway is Running'){
+            steps {
+                sh "sleep 6"
+                sh "curl -v http://localhost:${GW_PORT}/1"
+            }
+        }
+    }
+}
