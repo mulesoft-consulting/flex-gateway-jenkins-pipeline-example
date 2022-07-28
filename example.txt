@@ -9,7 +9,7 @@ pipeline {
         }
         stage('Checkout Project') {
             steps {
-               git ([url: 'https://github.com/bastump/gateway-app.git', branch: 'main', credentialsId: '45ae41f0-fc08-459c-a319-e26fc54a16a2'])
+               git ([url: 'https://github.com/bastump/gateway-app.git', branch: 'main', credentialsId: '${CREDS_ID}'])
             }
         }
         stage('Download Flex Gateway Image') {
